@@ -1,0 +1,185 @@
+name: Seaport cross-chain initialization audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seaport-cross-chain-init-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ethereum
+            chain_id: 1
+            rpcs: "https://ethereum-rpc.publicnode.com|https://eth.llamarpc.com|https://rpc.flashbots.net"
+          - name: polygon
+            chain_id: 137
+            rpcs: "https://polygon-bor-rpc.publicnode.com|https://polygon.drpc.org|https://polygon-rpc.com"
+          - name: optimism
+            chain_id: 10
+            rpcs: "https://optimism-rpc.publicnode.com|https://optimism.drpc.org|https://mainnet.optimism.io"
+          - name: arbitrum-one
+            chain_id: 42161
+            rpcs: "https://arbitrum-one-rpc.publicnode.com|https://arbitrum.drpc.org|https://arb1.arbitrum.io/rpc"
+          - name: arbitrum-nova
+            chain_id: 42170
+            rpcs: "https://arbitrum-nova-rpc.publicnode.com|https://nova.arbitrum.io/rpc"
+          - name: base
+            chain_id: 8453
+            rpcs: "https://base-rpc.publicnode.com|https://base.drpc.org|https://mainnet.base.org"
+          - name: avalanche
+            chain_id: 43114
+            rpcs: "https://avalanche-c-chain-rpc.publicnode.com|https://avalanche.drpc.org|https://api.avax.network/ext/bc/C/rpc"
+          - name: gnosis
+            chain_id: 100
+            rpcs: "https://gnosis-rpc.publicnode.com|https://gnosis.drpc.org|https://rpc.gnosischain.com"
+          - name: bsc
+            chain_id: 56
+            rpcs: "https://bsc-rpc.publicnode.com|https://bsc.drpc.org|https://bsc-dataseed.binance.org"
+          - name: kaia
+            chain_id: 8217
+            rpcs: "https://public-en.node.kaia.io|https://kaia.blockpi.network/v1/rpc/public|https://rpc.ankr.com/klaytn"
+          - name: moonbeam
+            chain_id: 1284
+            rpcs: "https://moonbeam-rpc.publicnode.com|https://rpc.api.moonbeam.network|https://moonbeam.public.blastapi.io"
+          - name: moonriver
+            chain_id: 1285
+            rpcs: "https://moonriver-rpc.publicnode.com|https://rpc.api.moonriver.moonbeam.network|https://moonriver.public.blastapi.io"
+          - name: canto
+            chain_id: 7700
+            rpcs: "https://canto-rpc.ansybl.io|https://canto.gravitychain.io|https://rpc.ankr.com/canto"
+          - name: fantom
+            chain_id: 250
+            rpcs: "https://fantom-rpc.publicnode.com|https://fantom.drpc.org|https://rpcapi.fantom.network"
+          - name: celo
+            chain_id: 42220
+            rpcs: "https://forno.celo.org|https://celo-rpc.publicnode.com|https://celo.drpc.org"
+          - name: zora
+            chain_id: 7777777
+            rpcs: "https://rpc.zora.energy|https://zora.drpc.org"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+
+      - name: Probe deployment and initialization graph
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          SEAPORT=0x0000000000000068F116a894984e2DB1123eB395
+          SEAPORT15=0x00000000000000ADc04C56Bf30aC9d3c0aAF14dC
+          CONTROLLER=0x00000000F9490004C11Cef243f5400493c00Ad63
+          CONDUIT=0x1e0049783f008a0085193e00003d00cd54003c71
+          TRANSFER_HELPER=0x0000000000c2d145a2526bD8C716263bFeBe1A72
+          CAPTAIN=0x0000000000d132a69d773c838080dc4Fa478388F
+          CREATOR=0x0000007b02230091a7ed01230072f7006a004d60
+          CONTROL_OWNER=0x939C8d89EBC11fA45e576215E2353673AD0bA18A
+          CONDUIT_KEY=0x0000007b02230091a7ed01230072f7006a004d60a8d4e71d599b8104250f0000
+          ZERO_KEY=0x0000000000000000000000000000000000000000000000000000000000000000
+          IMPL_SLOT=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          BEACON_SLOT=0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+
+          RPC=""
+          IFS='|' read -ra CANDIDATES <<< "${{ matrix.rpcs }}"
+          for candidate in "${CANDIDATES[@]}"; do
+            actual=$(timeout 15s cast chain-id --rpc-url "$candidate" 2>/dev/null || true)
+            code=$(timeout 15s cast code "$SEAPORT" --rpc-url "$candidate" 2>/dev/null || true)
+            if [[ "$actual" == "${{ matrix.chain_id }}" && "$code" == 0x* && ${#code} -gt 10 ]]; then
+              RPC="$candidate"
+              break
+            fi
+          done
+
+          echo "AUDIT_CHAIN=${{ matrix.name }}"
+          echo "EXPECTED_CHAIN_ID=${{ matrix.chain_id }}"
+          if [[ -z "$RPC" ]]; then
+            echo "AUDIT_STATUS=NO_WORKING_RPC_OR_SEAPORT_MISSING"
+            exit 0
+          fi
+
+          echo "AUDIT_STATUS=RPC_OK"
+          echo "RPC=$RPC"
+          echo "CHAIN_ID=$(cast chain-id --rpc-url "$RPC")"
+          echo "BLOCK=$(cast block-number --rpc-url "$RPC")"
+
+          code_meta() {
+            local label="$1" addr="$2" code size hash
+            code=$(timeout 20s cast code "$addr" --rpc-url "$RPC" 2>/dev/null || echo 0x)
+            size=$(( (${#code} > 2 ? ${#code} - 2 : 0) / 2 ))
+            hash=$(cast keccak "$code" 2>/dev/null || echo ERROR)
+            echo "CODE|$label|$addr|size=$size|hash=$hash"
+          }
+
+          safe_call() {
+            local label="$1" addr="$2" sig="$3"
+            shift 3
+            local out
+            out=$(timeout 20s cast call "$addr" "$sig" "$@" --rpc-url "$RPC" 2>&1) || out="ERROR:${out//$'\n'/ }"
+            out=${out//$'\n'/;}
+            echo "CALL|$label|$out"
+          }
+
+          safe_storage() {
+            local label="$1" addr="$2" slot="$3" out
+            out=$(timeout 20s cast storage "$addr" "$slot" --rpc-url "$RPC" 2>&1) || out="ERROR:${out//$'\n'/ }"
+            out=${out//$'\n'/;}
+            echo "STORAGE|$label|$out"
+          }
+
+          code_meta seaport_1_6 "$SEAPORT"
+          code_meta controller "$CONTROLLER"
+          code_meta conduit "$CONDUIT"
+          code_meta transfer_helper "$TRANSFER_HELPER"
+          code_meta seaport_1_5 "$SEAPORT15"
+          code_meta conduit_captain "$CAPTAIN"
+          code_meta conduit_creator "$CREATOR"
+          code_meta control_owner "$CONTROL_OWNER"
+
+          safe_call seaport_information "$SEAPORT" 'information()(string,bytes32,address)'
+          safe_call conduit_from_key "$CONTROLLER" 'getConduit(bytes32)(address,bool)' "$CONDUIT_KEY"
+          safe_call zero_key_conduit "$CONTROLLER" 'getConduit(bytes32)(address,bool)' "$ZERO_KEY"
+          safe_call conduit_key "$CONTROLLER" 'getKey(address)(bytes32)' "$CONDUIT"
+          safe_call conduit_owner "$CONTROLLER" 'ownerOf(address)(address)' "$CONDUIT"
+          safe_call conduit_potential_owner "$CONTROLLER" 'getPotentialOwner(address)(address)' "$CONDUIT"
+          safe_call conduit_channel_count "$CONTROLLER" 'getTotalChannels(address)(uint256)' "$CONDUIT"
+          safe_call conduit_channels "$CONTROLLER" 'getChannels(address)(address[])' "$CONDUIT"
+          safe_call channel_seaport_1_6 "$CONTROLLER" 'getChannelStatus(address,address)(bool)' "$CONDUIT" "$SEAPORT"
+          safe_call channel_transfer_helper "$CONTROLLER" 'getChannelStatus(address,address)(bool)' "$CONDUIT" "$TRANSFER_HELPER"
+          safe_call channel_seaport_1_5 "$CONTROLLER" 'getChannelStatus(address,address)(bool)' "$CONDUIT" "$SEAPORT15"
+
+          safe_call captain_owner "$CAPTAIN" 'owner()(address)'
+          safe_call captain_potential_owner "$CAPTAIN" 'potentialOwner()(address)'
+          safe_call captain_revoker "$CAPTAIN" 'getRevoker()(address)'
+          safe_call captain_controller "$CAPTAIN" 'getConduitController()(address)'
+
+          safe_storage seaport_impl_slot "$SEAPORT" "$IMPL_SLOT"
+          safe_storage controller_impl_slot "$CONTROLLER" "$IMPL_SLOT"
+          safe_storage conduit_impl_slot "$CONDUIT" "$IMPL_SLOT"
+          safe_storage transfer_helper_impl_slot "$TRANSFER_HELPER" "$IMPL_SLOT"
+          safe_storage captain_impl_slot "$CAPTAIN" "$IMPL_SLOT"
+          safe_storage creator_impl_slot "$CREATOR" "$IMPL_SLOT"
+          safe_storage seaport_beacon_slot "$SEAPORT" "$BEACON_SLOT"
+          safe_storage controller_beacon_slot "$CONTROLLER" "$BEACON_SLOT"
+
+          ATTACKER=0x000000000000000000000000000000000000bEEF
+          TARGET=0x000000000000000000000000000000000000c0De
+          safe_call attacker_update_channel "$CONTROLLER" 'updateChannel(address,address,bool)' "$CONDUIT" "$TARGET" true --from "$ATTACKER"
+          safe_call attacker_transfer_conduit_owner "$CONTROLLER" 'transferOwnership(address,address)' "$CONDUIT" "$ATTACKER" --from "$ATTACKER"
+          safe_call attacker_accept_conduit_owner "$CONTROLLER" 'acceptOwnership(address)' "$CONDUIT" --from "$ATTACKER"
+          safe_call attacker_captain_update_channel "$CAPTAIN" 'updateChannel(address,address,bool)' "$CONDUIT" "$TARGET" true --from "$ATTACKER"
+          safe_call attacker_captain_accept_owner "$CAPTAIN" 'acceptOwnership()' --from "$ATTACKER"
+
+          echo "AUDIT_COMPLETE=${{ matrix.name }}"
