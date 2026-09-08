@@ -1,0 +1,30 @@
+name: Kaia role collapse smoke
+
+on:
+  push:
+    branches:
+      - research/kaia-seaport-role-collapse
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        run: |
+          set -euxo pipefail
+          node --version
+          npm --version
+          go version
+          curl -fsS --max-time 20 -X POST -H 'content-type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"kaia_chainID","params":[]}' \
+            https://public-en-kairos.node.kaia.io | tee smoke-rpc.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kaia-role-collapse-smoke-${{ github.run_id }}
+          path: smoke-rpc.json
