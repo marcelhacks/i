@@ -85,6 +85,8 @@ jobs:
 
       - name: Execute exact Conduit witness three times
         shell: bash
+        env:
+          FOUNDRY_VIA_IR: "false"
         run: |
           set -euo pipefail
           : > conduit-evidence/all-replays.log
