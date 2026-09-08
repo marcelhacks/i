@@ -1,0 +1,129 @@
+name: Seaport cross-chain state summary
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seaport-cross-chain-summary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ethereum, chain_id: 1, rpcs: "https://ethereum-rpc.publicnode.com|https://eth.llamarpc.com" }
+          - { name: polygon, chain_id: 137, rpcs: "https://polygon-bor-rpc.publicnode.com|https://polygon.drpc.org" }
+          - { name: optimism, chain_id: 10, rpcs: "https://optimism-rpc.publicnode.com|https://optimism.drpc.org" }
+          - { name: arbitrum-one, chain_id: 42161, rpcs: "https://arbitrum-one-rpc.publicnode.com|https://arbitrum.drpc.org" }
+          - { name: arbitrum-nova, chain_id: 42170, rpcs: "https://arbitrum-nova-rpc.publicnode.com|https://nova.arbitrum.io/rpc" }
+          - { name: base, chain_id: 8453, rpcs: "https://base-rpc.publicnode.com|https://base.drpc.org" }
+          - { name: avalanche, chain_id: 43114, rpcs: "https://avalanche-c-chain-rpc.publicnode.com|https://avalanche.drpc.org" }
+          - { name: gnosis, chain_id: 100, rpcs: "https://gnosis-rpc.publicnode.com|https://gnosis.drpc.org" }
+          - { name: bsc, chain_id: 56, rpcs: "https://bsc-rpc.publicnode.com|https://bsc.drpc.org" }
+          - { name: kaia, chain_id: 8217, rpcs: "https://public-en.node.kaia.io|https://kaia.blockpi.network/v1/rpc/public" }
+          - { name: moonbeam, chain_id: 1284, rpcs: "https://moonbeam-rpc.publicnode.com|https://rpc.api.moonbeam.network" }
+          - { name: moonriver, chain_id: 1285, rpcs: "https://moonriver-rpc.publicnode.com|https://rpc.api.moonriver.moonbeam.network" }
+          - { name: canto, chain_id: 7700, rpcs: "https://canto-rpc.ansybl.io|https://canto.gravitychain.io" }
+          - { name: fantom, chain_id: 250, rpcs: "https://fantom-rpc.publicnode.com|https://fantom.drpc.org" }
+          - { name: celo, chain_id: 42220, rpcs: "https://forno.celo.org|https://celo-rpc.publicnode.com" }
+          - { name: zora, chain_id: 7777777, rpcs: "https://rpc.zora.energy|https://zora.drpc.org" }
+    steps:
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: { version: v1.4.4 }
+      - name: Probe concise state
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          F="out/${{ matrix.name }}.txt"
+          S=0x0000000000000068F116a894984e2DB1123eB395
+          S15=0x00000000000000ADc04C56Bf30aC9d3c0aAF14dC
+          C=0x00000000F9490004C11Cef243f5400493c00Ad63
+          D=0x1e0049783f008a0085193e00003d00cd54003c71
+          H=0x0000000000c2d145a2526bD8C716263bFeBe1A72
+          P=0x0000000000d132a69d773c838080dc4Fa478388F
+          R=0x0000007b02230091a7ed01230072f7006a004d60
+          O=0x939C8d89EBC11fA45e576215E2353673AD0bA18A
+          K=0x0000007b02230091a7ed01230072f7006a004d60a8d4e71d599b8104250f0000
+          Z=0x0000000000000000000000000000000000000000000000000000000000000000
+          I=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          B=0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+          RPC=""
+          IFS='|' read -ra RS <<< "${{ matrix.rpcs }}"
+          for x in "${RS[@]}"; do
+            id=$(timeout 12s cast chain-id --rpc-url "$x" 2>/dev/null || true)
+            code=$(timeout 12s cast code "$S" --rpc-url "$x" 2>/dev/null || true)
+            if [[ "$id" == "${{ matrix.chain_id }}" && "$code" == 0x* && ${#code} -gt 10 ]]; then RPC="$x"; break; fi
+          done
+          {
+            echo "chain=${{ matrix.name }}"
+            echo "chain_id=${{ matrix.chain_id }}"
+            if [[ -z "$RPC" ]]; then echo "status=NO_RPC_OR_SEAPORT"; exit 0; fi
+            echo "status=LIVE"
+            echo "block=$(cast block-number --rpc-url "$RPC")"
+            for pair in "seaport:$S" "controller:$C" "conduit:$D" "helper:$H" "seaport15:$S15" "captain:$P" "creator:$R" "control:$O"; do
+              n=${pair%%:*}; a=${pair#*:}; c=$(cast code "$a" --rpc-url "$RPC" 2>/dev/null || echo 0x)
+              echo "code.$n.size=$(((${#c}-2)/2))"
+              echo "code.$n.hash=$(cast keccak "$c" 2>/dev/null || echo ERROR)"
+            done
+            call() { local n="$1" a="$2" sig="$3"; shift 3; local v; v=$(cast call "$a" "$sig" "$@" --rpc-url "$RPC" 2>&1) || v="ERROR:${v//$'\n'/ }"; echo "$n=${v//$'\n'/;}"; }
+            slot() { local n="$1" a="$2" s="$3" v; v=$(cast storage "$a" "$s" --rpc-url "$RPC" 2>&1) || v="ERROR:${v//$'\n'/ }"; echo "$n=${v//$'\n'/;}"; }
+            call version "$S" 'information()(string,bytes32,address)'
+            call canonical "$C" 'getConduit(bytes32)(address,bool)' "$K"
+            call zero_conduit "$C" 'getConduit(bytes32)(address,bool)' "$Z"
+            call key "$C" 'getKey(address)(bytes32)' "$D"
+            call owner "$C" 'ownerOf(address)(address)' "$D"
+            call potential "$C" 'getPotentialOwner(address)(address)' "$D"
+            call channel_count "$C" 'getTotalChannels(address)(uint256)' "$D"
+            call channels "$C" 'getChannels(address)(address[])' "$D"
+            call captain_owner "$P" 'owner()(address)'
+            call captain_potential "$P" 'potentialOwner()(address)'
+            call captain_revoker "$P" 'getRevoker()(address)'
+            call captain_controller "$P" 'getConduitController()(address)'
+            slot impl.seaport "$S" "$I"; slot impl.controller "$C" "$I"; slot impl.conduit "$D" "$I"; slot impl.helper "$H" "$I"; slot impl.captain "$P" "$I"; slot impl.creator "$R" "$I"
+            slot beacon.seaport "$S" "$B"; slot beacon.controller "$C" "$B"
+            A=0x000000000000000000000000000000000000bEEF; T=0x000000000000000000000000000000000000c0De
+            call unauthorized.controller.update "$C" 'updateChannel(address,address,bool)' "$D" "$T" true --from "$A"
+            call unauthorized.controller.transfer "$C" 'transferOwnership(address,address)' "$D" "$A" --from "$A"
+            call unauthorized.controller.accept "$C" 'acceptOwnership(address)' "$D" --from "$A"
+            call unauthorized.captain.update "$P" 'updateChannel(address,address,bool)' "$D" "$T" true --from "$A"
+            call unauthorized.captain.accept "$P" 'acceptOwnership()' --from "$A"
+          } > "$F"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: state-${{ matrix.name }}
+          path: out/${{ matrix.name }}.txt
+          if-no-files-found: error
+
+  aggregate:
+    needs: probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: state-*
+          path: downloaded
+          merge-multiple: true
+      - name: Commit compact state table
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results/seaport-cross-chain-state
+          {
+            echo "generated_utc=$(date -u +%FT%TZ)"
+            for f in $(find downloaded -type f -name '*.txt' | sort); do echo; cat "$f"; done
+          } > results/seaport-cross-chain-state/latest.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/seaport-cross-chain-state/latest.txt
+          git commit -m 'Record cross-chain Seaport state' || exit 0
+          git push
