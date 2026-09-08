@@ -1,0 +1,108 @@
+name: Analyze Seaport cross-chain state
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seaport-cross-chain-anomalies.yml'
+      - 'results/seaport-cross-chain-state/latest.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Normalize and flag anomalies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import csv
+
+          src = Path('results/seaport-cross-chain-state/latest.txt')
+          blocks = [b for b in src.read_text().split('\n\n') if b.startswith('chain=')]
+          rows = []
+          for b in blocks:
+              d = {}
+              for line in b.splitlines():
+                  if '=' in line:
+                      k, v = line.split('=', 1)
+                      d[k] = v
+              rows.append(d)
+          rows.sort(key=lambda x: x.get('chain',''))
+
+          cols = [
+              'chain','chain_id','status','block',
+              'code.seaport.size','code.seaport.hash',
+              'code.controller.size','code.controller.hash',
+              'code.conduit.size','code.conduit.hash',
+              'code.helper.size','code.helper.hash',
+              'code.captain.size','code.captain.hash',
+              'code.creator.size','code.creator.hash',
+              'code.control.size',
+              'canonical','zero_conduit','key','owner','potential','channel_count','channels',
+              'captain_owner','captain_potential','captain_revoker','captain_controller',
+              'impl.seaport','impl.controller','impl.conduit','impl.helper','impl.captain','impl.creator',
+              'beacon.seaport','beacon.controller',
+              'unauthorized.controller.update','unauthorized.controller.transfer','unauthorized.controller.accept',
+              'unauthorized.captain.update','unauthorized.captain.accept'
+          ]
+          outdir = Path('results/seaport-cross-chain-state')
+          outdir.mkdir(parents=True, exist_ok=True)
+          with (outdir/'matrix.csv').open('w', newline='') as f:
+              w = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
+              w.writeheader(); w.writerows(rows)
+
+          zero = '0x' + '0'*64
+          expected_channels = '[0x00000000000000ADc04C56Bf30aC9d3c0aAF14dC, 0x0000000000c2d145a2526bD8C716263bFeBe1A72, 0x0000000000000068F116a894984e2DB1123eB395]'
+          expected_owner = '0x0000000000d132a69d773c838080dc4Fa478388F'
+          expected_controller = '0x00000000F9490004C11Cef243f5400493c00Ad63'
+          common_hash_keys = ['code.controller.hash','code.conduit.hash','code.helper.hash','code.captain.hash','code.creator.hash']
+          baselines = {}
+          for k in common_hash_keys:
+              vals = [r.get(k) for r in rows if r.get(k)]
+              baselines[k] = max(set(vals), key=vals.count) if vals else None
+
+          report = []
+          for r in rows:
+              chain = r.get('chain','?')
+              flags = []
+              if r.get('status') != 'LIVE': flags.append('not_live')
+              if not r.get('canonical','').lower().endswith(';true'): flags.append('canonical_missing')
+              if r.get('owner') != expected_owner: flags.append('unexpected_conduit_owner')
+              if r.get('potential') != '0x0000000000000000000000000000000000000000': flags.append('conduit_transfer_pending')
+              if r.get('channel_count') != '3': flags.append('channel_count')
+              if r.get('channels') != expected_channels: flags.append('channel_set')
+              if r.get('captain_potential') != '0x0000000000000000000000000000000000000000': flags.append('captain_transfer_pending')
+              if r.get('captain_controller') != expected_controller: flags.append('captain_controller')
+              for k in common_hash_keys:
+                  if r.get(k) != baselines[k]: flags.append(k)
+              for k in ['impl.seaport','impl.controller','impl.conduit','impl.helper','impl.captain','impl.creator','beacon.seaport','beacon.controller']:
+                  if r.get(k) != zero: flags.append(k)
+              for k in ['unauthorized.controller.update','unauthorized.controller.transfer','unauthorized.controller.accept','unauthorized.captain.update','unauthorized.captain.accept']:
+                  if not r.get(k,'').startswith('ERROR:'): flags.append(k+'_SUCCEEDED')
+              report.append(f"{chain}: " + (', '.join(flags) if flags else 'OK'))
+
+          text = [
+              'Cross-chain Seaport initialization anomaly report',
+              f'chains={len(rows)}',
+              '',
+              *report,
+              '',
+              'Common runtime hashes:',
+              *[f'{k}={v}' for k,v in baselines.items()]
+          ]
+          (outdir/'anomalies.txt').write_text('\n'.join(text) + '\n')
+          PY
+      - name: Commit analysis
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/seaport-cross-chain-state/matrix.csv results/seaport-cross-chain-state/anomalies.txt
+          git commit -m 'Analyze cross-chain Seaport state' || exit 0
+          git push
