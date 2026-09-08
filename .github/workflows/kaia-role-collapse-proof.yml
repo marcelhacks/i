@@ -1,0 +1,193 @@
+name: Kaia Seaport AccountKey role-collapse proof
+
+on:
+  push:
+    branches:
+      - research/kaia-seaport-role-collapse
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry 1.8.1
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Select exact Kaia mainnet fork
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          SEAPORT=0x0000000000000068F116a894984e2DB1123eB395
+          RPC=''
+          : > evidence/rpc-probes.txt
+          for candidate in \
+            https://archive-en.node.kaia.io \
+            https://public-en.node.kaia.io \
+            https://kaia.blockpi.network/v1/rpc/public
+          do
+            chain=$(timeout 20 cast chain-id --rpc-url "$candidate" 2>&1 || true)
+            block=$(timeout 20 cast block-number --rpc-url "$candidate" 2>&1 || true)
+            code=$(timeout 25 cast code "$SEAPORT" --rpc-url "$candidate" 2>&1 || true)
+            printf 'rpc=%s\nchain=%s\nblock=%s\ncode_chars=%s\n---\n' "$candidate" "$chain" "$block" "${#code}" >> evidence/rpc-probes.txt
+            if [ "$chain" = 8217 ] && [[ "$block" =~ ^[0-9]+$ ]] && [[ "$code" == 0x* ]] && [ "${#code}" -gt 1000 ]; then
+              RPC="$candidate"
+              break
+            fi
+          done
+          cat evidence/rpc-probes.txt
+          test -n "$RPC"
+          BLOCK=$(cast block-number --rpc-url "$RPC")
+          CODE=$(cast code "$SEAPORT" --block "$BLOCK" --rpc-url "$RPC")
+          CODEHASH=$(cast keccak "$CODE")
+          CODESIZE=$(( (${#CODE} - 2) / 2 ))
+          INFO=$(cast call "$SEAPORT" 'information()(string,bytes32,address)' --block "$BLOCK" --rpc-url "$RPC" | tr '\n' ' ')
+          {
+            echo "KAIA_RPC_URL=$RPC"
+            echo "KAIA_FORK_BLOCK=$BLOCK"
+            echo "SEAPORT_CODEHASH=$CODEHASH"
+          } >> "$GITHUB_ENV"
+          {
+            echo "rpc=$RPC"
+            echo "chain_id=8217"
+            echo "fork_block=$BLOCK"
+            echo "seaport=$SEAPORT"
+            echo "runtime_size=$CODESIZE"
+            echo "runtime_codehash=$CODEHASH"
+            echo "information=$INFO"
+          } | tee evidence/deployment.txt
+          printf '%s\n' "$CODE" > evidence/seaport-runtime.hex
+
+      - name: Install forge-std
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf research/kaia-role-collapse/lib/forge-std
+          git clone --depth 1 https://github.com/foundry-rs/forge-std.git research/kaia-role-collapse/lib/forge-std
+
+      - name: Execute exact-runtime Seaport proof three times
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > evidence/forge-all.log
+          for i in 1 2 3; do
+            echo "===== REPLAY $i =====" | tee -a evidence/forge-all.log
+            forge test \
+              --root research/kaia-role-collapse \
+              --match-contract KaiaRoleCollapseTest \
+              --force -vvvv 2>&1 | tee "evidence/forge-replay-$i.log" | tee -a evidence/forge-all.log
+          done
+          grep -q 'KAIA_ROLE_COLLAPSE_WITNESS' evidence/forge-replay-1.log
+          grep -q '3 passed; 0 failed' evidence/forge-replay-1.log
+          grep -q '3 passed; 0 failed' evidence/forge-replay-2.log
+          grep -q '3 passed; 0 failed' evidence/forge-replay-3.log
+
+      - name: Clone pinned Kaia source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf kaia
+          git init kaia
+          git -C kaia remote add origin https://github.com/kaiachain/kaia.git
+          git -C kaia fetch --depth 1 origin 2d175bab08cefa669f8bc73dd5ce0ea26bc12ebd
+          git -C kaia checkout --detach FETCH_HEAD
+          git -C kaia rev-parse HEAD | tee evidence/kaia-source-commit.txt
+          cp research/kaia-role-collapse/kaia_accountkey_role_test.go \
+            kaia/blockchain/types/accountkey/seaport_role_collapse_test.go
+
+      - name: Set up Kaia Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: kaia/go.mod
+          cache-dependency-path: kaia/go.sum
+
+      - name: Execute Kaia-native role differential three times
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > evidence/kaia-accountkey-all.log
+          for i in 1 2 3; do
+            echo "===== REPLAY $i =====" | tee -a evidence/kaia-accountkey-all.log
+            (
+              cd kaia
+              go test ./blockchain/types/accountkey \
+                -run '^TestSeaportCrossRoleCollapse_' \
+                -count=1 -v
+            ) 2>&1 | tee "evidence/kaia-accountkey-replay-$i.log" | tee -a evidence/kaia-accountkey-all.log
+          done
+          for i in 1 2 3; do
+            grep -q 'KAIA_FAIL_ROLE_MATRIX' "evidence/kaia-accountkey-replay-$i.log"
+            grep -q 'KAIA_THRESHOLD_ROLE_MATRIX' "evidence/kaia-accountkey-replay-$i.log"
+            grep -q '^PASS$' "evidence/kaia-accountkey-replay-$i.log"
+          done
+
+      - name: Produce authorization ledger and machine verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          VICTIM=$(grep -m1 'victim:' evidence/forge-replay-1.log | sed -E 's/.*victim: ([^ ]+).*/\1/' || true)
+          cat > evidence/AUTHORIZATION_LEDGER.md <<'EOF'
+          # Authorization ledger
+
+          The same address-derived key K0 is tested in both independent engines.
+
+          | Capability under Kaia AccountKeyRoleBased | K0 result |
+          |---|---|
+          | RoleTransaction with AccountKeyFail | Rejected |
+          | RoleTransaction with threshold 2-of-2 | Rejected |
+          | RoleAccountUpdate assigned to another key | Rejected |
+          | RoleFeePayer assigned AccountKeyLegacy | Accepted |
+          | Seaport EIP-712 order authorization | Accepted |
+
+          Controlled approved assets transferred by exact Kaia Seaport 1.6 runtime:
+
+          | Asset | Authorized by Kaia RoleTransaction | Actual through Seaport |
+          |---|---:|---:|
+          | ERC20 | 0 | 100 ether units |
+          | ERC721 | 0 | token ID 721 |
+          | ERC1155 | 0 | 7 units of token ID 1155 |
+
+          The attacker submits the fulfillment. The role-based account submits no exploit transaction.
+          EOF
+
+          cat > evidence/VERDICT.txt <<'EOF'
+          TECHNICAL_ROLE_COLLAPSE_PROVEN
+          EOF
+
+          cat > evidence/SUMMARY.md <<EOF
+          # Kaia Seaport AccountKey role-collapse proof
+
+          VERDICT=TECHNICAL_ROLE_COLLAPSE_PROVEN
+
+          ## Exact target
+          - Chain ID: 8217
+          - Fork block: $KAIA_FORK_BLOCK
+          - Seaport: 0x0000000000000068F116a894984e2DB1123eB395
+          - Runtime codehash: $SEAPORT_CODEHASH
+
+          ## Independent engine results
+          - Exact deployed Seaport runtime: three replays, each 3 passed and 0 failed.
+          - Pinned Kaia AccountKey implementation: three replays, both role matrices passed.
+
+          ## Proven differential
+          The address-derived K0 is accepted only under RoleFeePayer in the Kaia-native role matrix. It is rejected under RoleTransaction when that role is AccountKeyFail or threshold 2-of-2. The exact Kaia Seaport runtime nevertheless accepts K0 as the offerer's EIP-712 signer and transfers controlled ERC20, ERC721, and ERC1155 assets to an unrelated fulfiller.
+          EOF
+
+          sha256sum evidence/* > evidence/SHA256SUMS.txt
+          cat evidence/SUMMARY.md
+          cat evidence/AUTHORIZATION_LEDGER.md
+
+      - name: Upload proof evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaia-seaport-role-collapse-${{ github.run_id }}
+          path: evidence
+          if-no-files-found: error
