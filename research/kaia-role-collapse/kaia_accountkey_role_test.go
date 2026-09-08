@@ -6,10 +6,20 @@ import (
     "testing"
 
     "github.com/kaiachain/kaia/crypto"
+    "github.com/kaiachain/kaia/fork"
+    "github.com/kaiachain/kaia/params"
     "github.com/kaiachain/kaia/rlp"
 )
 
 const roleTestBlock = uint64(200_000_000)
+
+func initializeForkRules(t *testing.T) {
+    t.Helper()
+    if err := fork.SetHardForkBlockNumberConfig(params.MainnetChainConfig); err != nil {
+        t.Fatalf("initialize fork rules: %v", err)
+    }
+    t.Cleanup(fork.ClearHardForkBlockNumberConfig)
+}
 
 func mustKey(t *testing.T, raw string) *ecdsa.PrivateKey {
     t.Helper()
@@ -34,6 +44,8 @@ func recovered(t *testing.T, key *ecdsa.PrivateKey, digest []byte) *ecdsa.Public
 }
 
 func TestSeaportCrossRoleCollapse_AccountKeyFailTransaction_LegacyFeePayer(t *testing.T) {
+    initializeForkRules(t)
+
     feeKey := mustKey(t, "00000000000000000000000000000000000000000000000000000000000a11ce")
     updateKey := mustKey(t, "00000000000000000000000000000000000000000000000000000000000c0ffe")
     from := crypto.PubkeyToAddress(feeKey.PublicKey)
@@ -75,6 +87,8 @@ func TestSeaportCrossRoleCollapse_AccountKeyFailTransaction_LegacyFeePayer(t *te
 }
 
 func TestSeaportCrossRoleCollapse_ThresholdTransaction_LegacyFeePayer(t *testing.T) {
+    initializeForkRules(t)
+
     feeKey := mustKey(t, "00000000000000000000000000000000000000000000000000000000000a11ce")
     txKey1 := mustKey(t, "00000000000000000000000000000000000000000000000000000000000b0b01")
     txKey2 := mustKey(t, "00000000000000000000000000000000000000000000000000000000000b0b02")
