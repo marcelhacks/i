@@ -1,0 +1,26 @@
+Cross-chain Seaport initialization anomaly report
+chains=16
+
+arbitrum-nova: OK
+arbitrum-one: OK
+avalanche: OK
+base: OK
+bsc: OK
+canto: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+celo: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+ethereum: OK
+fantom: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+gnosis: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+kaia: OK
+moonbeam: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+moonriver: not_live, canonical_missing, unexpected_conduit_owner, conduit_transfer_pending, channel_count, channel_set, captain_transfer_pending, captain_controller, code.controller.hash, code.conduit.hash, code.helper.hash, code.captain.hash, code.creator.hash, impl.seaport, impl.controller, impl.conduit, impl.helper, impl.captain, impl.creator, beacon.seaport, beacon.controller, unauthorized.controller.update_SUCCEEDED, unauthorized.controller.transfer_SUCCEEDED, unauthorized.controller.accept_SUCCEEDED, unauthorized.captain.update_SUCCEEDED, unauthorized.captain.accept_SUCCEEDED
+optimism: OK
+polygon: OK
+zora: OK
+
+Common runtime hashes:
+code.controller.hash=0x880348b652e7cce91216153a4d0107e70c77b92192f3d7a127ff1f1351961948
+code.conduit.hash=0x069efdc9b946a332dce9951324fa197268e3ff0e00e44c6bf36049fc53113a41
+code.helper.hash=0xfca51532ea72b2f20041b9d008770cb6cfd9e90b7cf6ec271512a677b778b022
+code.captain.hash=0xb5506a1c670037fc613cf35627741dbee6951feeafc81e145247a09864b2c63a
+code.creator.hash=0x6d797070c9afc4c9752baf88fda8e0ad5e897f9c657e666462e9365beef9243b
