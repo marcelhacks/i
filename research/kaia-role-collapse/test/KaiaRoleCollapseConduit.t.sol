@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {console2} from "forge-std/console2.sol";
 import {KaiaRoleCollapseTest, OrderComponents, Order} from "./KaiaRoleCollapse.t.sol";
 
 contract KaiaRoleCollapseConduitTest is KaiaRoleCollapseTest {
