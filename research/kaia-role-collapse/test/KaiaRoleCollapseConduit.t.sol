@@ -6,7 +6,7 @@ import {KaiaRoleCollapseTest, OrderComponents, Order} from "./KaiaRoleCollapse.t
 
 contract KaiaRoleCollapseConduitTest is KaiaRoleCollapseTest {
     address internal constant OPENSEA_CONDUIT =
-        0x1e0049783f008a0085193e00003d00cd54003c71;
+        0x1E0049783F008A0085193E00003D00cd54003c71;
 
     event ConduitAuthorizationDelta(
         address indexed victim,
@@ -33,8 +33,6 @@ contract KaiaRoleCollapseConduitTest is KaiaRoleCollapseTest {
             "WRONG_CONDUIT_RUNTIME"
         );
 
-        // Remove every direct Seaport approval and retain only standing
-        // approvals to the exact OpenSea Conduit.
         vm.startPrank(victim);
         token20.approve(SEAPORT, 0);
         token721.setApprovalForAll(SEAPORT, false);
