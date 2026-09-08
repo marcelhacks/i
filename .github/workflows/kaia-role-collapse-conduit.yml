@@ -1,0 +1,130 @@
+name: Kaia Seaport role collapse through OpenSea Conduit
+
+on:
+  push:
+    branches:
+      - research/kaia-seaport-role-collapse
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conduit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Resolve exact Kaia deployment and Conduit authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p conduit-evidence
+          SEAPORT=0x0000000000000068F116a894984e2DB1123eB395
+          CONTROLLER=0x00000000F9490004C11Cef243f5400493c00Ad63
+          CONDUIT=0x1e0049783f008a0085193e00003d00cd54003c71
+          RPC=''
+          for candidate in \
+            https://archive-en.node.kaia.io \
+            https://public-en.node.kaia.io \
+            https://kaia.blockpi.network/v1/rpc/public
+          do
+            chain=$(timeout 20 cast chain-id --rpc-url "$candidate" 2>&1 || true)
+            block=$(timeout 20 cast block-number --rpc-url "$candidate" 2>&1 || true)
+            code=$(timeout 20 cast code "$CONDUIT" --rpc-url "$candidate" 2>&1 || true)
+            if [ "$chain" = 8217 ] && [[ "$block" =~ ^[0-9]+$ ]] && [[ "$code" == 0x* ]] && [ "${#code}" -gt 1000 ]; then
+              RPC="$candidate"
+              break
+            fi
+          done
+          test -n "$RPC"
+          BLOCK=$(cast block-number --rpc-url "$RPC")
+          SEAPORT_CODE=$(cast code "$SEAPORT" --block "$BLOCK" --rpc-url "$RPC")
+          CONDUIT_CODE=$(cast code "$CONDUIT" --block "$BLOCK" --rpc-url "$RPC")
+          SEAPORT_HASH=$(cast keccak "$SEAPORT_CODE")
+          CONDUIT_HASH=$(cast keccak "$CONDUIT_CODE")
+          CONDUIT_KEY=$(cast call "$CONTROLLER" 'getKey(address)(bytes32)' "$CONDUIT" --block "$BLOCK" --rpc-url "$RPC")
+          CHANNEL_OPEN=$(cast call "$CONTROLLER" 'getChannelStatus(address,address)(bool)' "$CONDUIT" "$SEAPORT" --block "$BLOCK" --rpc-url "$RPC")
+          OWNER=$(cast call "$CONTROLLER" 'ownerOf(address)(address)' "$CONDUIT" --block "$BLOCK" --rpc-url "$RPC")
+          PENDING=$(cast call "$CONTROLLER" 'getPotentialOwner(address)(address)' "$CONDUIT" --block "$BLOCK" --rpc-url "$RPC")
+          test "$CHANNEL_OPEN" = true
+          test "$CONDUIT_KEY" != 0x0000000000000000000000000000000000000000000000000000000000000000
+          {
+            echo "KAIA_RPC_URL=$RPC"
+            echo "KAIA_FORK_BLOCK=$BLOCK"
+            echo "SEAPORT_CODEHASH=$SEAPORT_HASH"
+            echo "OPENSEA_CONDUIT_KEY=$CONDUIT_KEY"
+            echo "OPENSEA_CONDUIT_CODEHASH=$CONDUIT_HASH"
+          } >> "$GITHUB_ENV"
+          {
+            echo "rpc=$RPC"
+            echo "chain_id=8217"
+            echo "block=$BLOCK"
+            echo "seaport=$SEAPORT"
+            echo "seaport_codehash=$SEAPORT_HASH"
+            echo "controller=$CONTROLLER"
+            echo "conduit=$CONDUIT"
+            echo "conduit_codehash=$CONDUIT_HASH"
+            echo "conduit_key=$CONDUIT_KEY"
+            echo "seaport_channel_open=$CHANNEL_OPEN"
+            echo "conduit_owner=$OWNER"
+            echo "conduit_pending_owner=$PENDING"
+          } | tee conduit-evidence/deployment-and-channel.txt
+
+      - name: Install forge-std
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf research/kaia-role-collapse/lib/forge-std
+          git clone --depth 1 https://github.com/foundry-rs/forge-std.git research/kaia-role-collapse/lib/forge-std
+
+      - name: Execute exact Conduit witness three times
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > conduit-evidence/all-replays.log
+          for i in 1 2 3; do
+            forge test \
+              --root research/kaia-role-collapse \
+              --match-contract '^KaiaRoleCollapseConduitTest$' \
+              --match-test '^testRoleFeePayerOnlyKeyDrainsThroughExactOpenSeaConduit$' \
+              --force -vvvv 2>&1 | tee "conduit-evidence/replay-$i.log" | tee -a conduit-evidence/all-replays.log
+            grep -q 'KAIA_ROLE_COLLAPSE_CONDUIT_WITNESS' "conduit-evidence/replay-$i.log"
+            grep -q '1 passed; 0 failed' "conduit-evidence/replay-$i.log"
+          done
+
+      - name: Verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > conduit-evidence/VERDICT.txt <<'EOF'
+          EXACT_OPENSEA_CONDUIT_ROLE_COLLAPSE_PROVEN
+          EOF
+          cat > conduit-evidence/SUMMARY.md <<EOF
+          # Exact OpenSea Conduit role-collapse proof
+
+          VERDICT=EXACT_OPENSEA_CONDUIT_ROLE_COLLAPSE_PROVEN
+
+          Seaport is an enabled channel on OpenSea's exact Kaia Conduit. The controlled victim has zero direct approvals to Seaport and standing approvals only to that Conduit. A fresh zero-consideration order signed by the address-derived K0 transfers controlled ERC20, ERC721 and ERC1155 assets to an unrelated fulfiller, despite K0 being restricted to RoleFeePayer in the companion Kaia-native proof.
+
+          - Chain: Kaia mainnet, 8217
+          - Fork block: $KAIA_FORK_BLOCK
+          - Seaport codehash: $SEAPORT_CODEHASH
+          - Conduit codehash: $OPENSEA_CONDUIT_CODEHASH
+          - Conduit key: $OPENSEA_CONDUIT_KEY
+          - Replays: 3 of 3
+          EOF
+          sha256sum conduit-evidence/* > conduit-evidence/SHA256SUMS.txt
+          cat conduit-evidence/SUMMARY.md
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaia-role-collapse-conduit-${{ github.run_id }}
+          path: conduit-evidence
+          if-no-files-found: error
