@@ -91,8 +91,7 @@ jobs:
           for i in 1 2 3; do
             forge test \
               --root research/kaia-role-collapse \
-              --match-contract '^KaiaRoleCollapseConduitTest$' \
-              --match-test '^testRoleFeePayerOnlyKeyDrainsThroughExactOpenSeaConduit$' \
+              --match-test 'testRoleFeePayerOnlyKeyDrainsThroughExactOpenSeaConduit' \
               --force -vvvv 2>&1 | tee "conduit-evidence/replay-$i.log" | tee -a conduit-evidence/all-replays.log
             grep -q 'KAIA_ROLE_COLLAPSE_CONDUIT_WITNESS' "conduit-evidence/replay-$i.log"
             grep -q '1 passed; 0 failed' "conduit-evidence/replay-$i.log"
@@ -123,6 +122,7 @@ jobs:
           cat conduit-evidence/SUMMARY.md
 
       - name: Upload evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kaia-role-collapse-conduit-${{ github.run_id }}
