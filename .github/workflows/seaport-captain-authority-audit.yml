@@ -1,0 +1,106 @@
+name: Audit Seaport conduit authority initialization
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/seaport-captain-authority-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+      - name: Audit Ethereum conduit authority graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          RPC=https://ethereum-rpc.publicnode.com
+          CONTROLLER=0x00000000F9490004C11Cef243f5400493c00Ad63
+          CONDUIT=0x1e0049783f008a0085193e00003d00cd54003c71
+          IMPL=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          ADMIN=0xb53127684a568b3173ae13b9f8a6016e019e8e9f8a6016e019e8e9f8a6016e0
+          BEACON=0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+          # Correct EIP-1967 admin slot.
+          ADMIN=0xb53127684a568b3173ae13b9f8a6016e01913b793e8a6016e01913b793e8a601
+          out=results/seaport-captain-authority-audit.txt
+          : > "$out"
+          echo "chain_id=$(cast chain-id --rpc-url $RPC)" >> "$out"
+          echo "block=$(cast block-number --rpc-url $RPC)" >> "$out"
+          owner=$(cast call "$CONTROLLER" 'ownerOf(address)(address)' "$CONDUIT" --rpc-url "$RPC")
+          potential=$(cast call "$CONTROLLER" 'getPotentialOwner(address)(address)' "$CONDUIT" --rpc-url "$RPC")
+          echo "conduit_owner=$owner" >> "$out"
+          echo "conduit_potential_owner=$potential" >> "$out"
+
+          audit_addr() {
+            local label=$1 addr=$2
+            echo "[$label]" >> "$out"
+            echo "address=$addr" >> "$out"
+            code=$(cast code "$addr" --rpc-url "$RPC")
+            echo "code_size=$(((${#code}-2)/2))" >> "$out"
+            echo "code_hash=$(cast keccak "$code")" >> "$out"
+            echo "nonce=$(cast nonce "$addr" --rpc-url "$RPC")" >> "$out"
+            for item in \
+              "owner()(address)" \
+              "potentialOwner()(address)" \
+              "getRevoker()(address)" \
+              "getConduitController()(address)" \
+              "threshold()(uint256)" \
+              "getThreshold()(uint256)" \
+              "getOwners()(address[])" \
+              "VERSION()(string)" \
+              "initialized()(bool)" \
+              "isInitialized()(bool)"; do
+              val=$(cast call "$addr" "$item" --rpc-url "$RPC" 2>&1 || true)
+              echo "call.$item=${val//$'\n'/ }" >> "$out"
+            done
+            for slot in "$IMPL" "$ADMIN" "$BEACON" 0 1 2 3 4 5 6 7 8 9; do
+              val=$(cast storage "$addr" "$slot" --rpc-url "$RPC" 2>&1 || true)
+              echo "slot.$slot=${val//$'\n'/ }" >> "$out"
+            done
+          }
+
+          audit_addr conduit_owner "$owner"
+          cap_owner=$(cast call "$owner" 'owner()(address)' --rpc-url "$RPC" 2>/dev/null || echo 0x0000000000000000000000000000000000000000)
+          cap_potential=$(cast call "$owner" 'potentialOwner()(address)' --rpc-url "$RPC" 2>/dev/null || echo 0x0000000000000000000000000000000000000000)
+          cap_revoker=$(cast call "$owner" 'getRevoker()(address)' --rpc-url "$RPC" 2>/dev/null || echo 0x0000000000000000000000000000000000000000)
+          echo "captain_owner=$cap_owner" >> "$out"
+          echo "captain_potential=$cap_potential" >> "$out"
+          echo "captain_revoker=$cap_revoker" >> "$out"
+          audit_addr captain_owner "$cap_owner"
+          audit_addr captain_revoker "$cap_revoker"
+
+          # Common uninitialized Safe and proxy indicators.
+          verdict=NO_OBVIOUS_UNINITIALIZED_AUTHORITY
+          for addr in "$owner" "$cap_owner" "$cap_revoker"; do
+            code=$(cast code "$addr" --rpc-url "$RPC")
+            size=$(((${#code}-2)/2))
+            if [ "$size" -gt 0 ]; then
+              owners=$(cast call "$addr" 'getOwners()(address[])' --rpc-url "$RPC" 2>/dev/null || true)
+              threshold=$(cast call "$addr" 'getThreshold()(uint256)' --rpc-url "$RPC" 2>/dev/null || true)
+              if [[ "$owners" == "[]" || "$threshold" == "0" ]]; then
+                verdict=POTENTIAL_UNINITIALIZED_SAFE_AUTHORITY
+              fi
+            fi
+          done
+          echo "VERDICT=$verdict" >> "$out"
+          cat "$out"
+      - name: Commit report
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/seaport-captain-authority-audit.txt
+          git commit -m 'Record Seaport conduit authority audit' || exit 0
+          git push
