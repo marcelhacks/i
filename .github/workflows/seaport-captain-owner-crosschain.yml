@@ -1,0 +1,215 @@
+name: Seaport Captain owner cross-chain scan
+
+on:
+  push:
+    branches:
+      - research/seaport-golden-p1
+    paths:
+      - .github/workflows/seaport-captain-owner-crosschain.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+      - name: Scan Captain owners
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python3 - <<'PY'
+          import csv, json, os, subprocess, urllib.request, urllib.parse, concurrent.futures, time
+          from pathlib import Path
+
+          MATRIX = Path('results/seaport-cross-chain-state/matrix.csv')
+          if not MATRIX.exists():
+              raise SystemExit('matrix missing')
+
+          rows = list(csv.DictReader(MATRIX.open()))
+
+          FALLBACK = {
+              1:['https://ethereum-rpc.publicnode.com','https://rpc.flashbots.net'],
+              10:['https://optimism-rpc.publicnode.com','https://mainnet.optimism.io'],
+              56:['https://bsc-rpc.publicnode.com'],
+              100:['https://gnosis-rpc.publicnode.com'],
+              130:['https://mainnet.unichain.org'],
+              137:['https://polygon-bor-rpc.publicnode.com'],
+              360:['https://mainnet.shape.network'],
+              747:['https://mainnet.evm.nodes.onflow.org'],
+              1284:['https://rpc.api.moonbeam.network'],
+              1285:['https://rpc.api.moonriver.moonbeam.network'],
+              1329:['https://evm-rpc.sei-apis.com'],
+              1727:['https://rpc01.ethpar.net/'],
+              1868:['https://rpc.soneium.org'],
+              2020:['https://api.roninchain.com/rpc'],
+              5000:['https://rpc.mantle.xyz'],
+              8217:['https://public-en.node.kaia.io'],
+              8333:['https://mainnet-rpc.b3.fun'],
+              8453:['https://base-rpc.publicnode.com'],
+              33139:['https://rpc.apechain.com'],
+              34443:['https://mainnet.mode.network'],
+              42161:['https://arbitrum-one-rpc.publicnode.com'],
+              42170:['https://arbitrum-nova-rpc.publicnode.com'],
+              43114:['https://avalanche-c-chain-rpc.publicnode.com'],
+              59144:['https://rpc.linea.build'],
+              80094:['https://rpc.berachain.com'],
+              81457:['https://blast-rpc.publicnode.com'],
+              534352:['https://rpc.scroll.io'],
+              7777777:['https://rpc.zora.energy'],
+          }
+
+          def fetch_json(url, timeout=25):
+              req=urllib.request.Request(url,headers={'User-Agent':'seaport-owner-scan/1.0'})
+              with urllib.request.urlopen(req,timeout=timeout) as r:
+                  return json.loads(r.read().decode())
+
+          try:
+              chainlist=fetch_json('https://chainid.network/chains.json')
+          except Exception:
+              chainlist=[]
+          endpoints={}
+          for ch in chainlist:
+              try: cid=int(ch['chainId'])
+              except Exception: continue
+              out=endpoints.setdefault(cid,[])
+              for x in ch.get('rpc') or []:
+                  if isinstance(x,dict): x=x.get('url')
+                  if not isinstance(x,str) or not x.startswith('https://'): continue
+                  if any(c in x for c in ('${','{','}','<','>')): continue
+                  if x not in out: out.append(x)
+          for cid, eps in FALLBACK.items():
+              endpoints[cid]=list(dict.fromkeys(eps+endpoints.get(cid,[])))
+
+          def rpc(url, method, params, timeout=12):
+              payload=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode()
+              req=urllib.request.Request(url,data=payload,headers={'content-type':'application/json','user-agent':'seaport-owner-scan/1.0'})
+              try:
+                  with urllib.request.urlopen(req,timeout=timeout) as r:
+                      obj=json.loads(r.read().decode())
+                  return obj.get('result')
+              except Exception:
+                  return None
+
+          def eth_call(url,to,data):
+              return rpc(url,'eth_call',[{'to':to,'data':data},'latest'])
+
+          def selector(sig):
+              return subprocess.check_output(['cast','sig',sig],text=True,timeout=10).strip()
+
+          SIGS={
+            'masterCopy':'masterCopy()',
+            'getOwners':'getOwners()',
+            'getThreshold':'getThreshold()',
+            'nonce':'nonce()',
+            'owner':'owner()',
+            'potentialOwner':'potentialOwner()',
+            'implementation':'implementation()',
+            'initialized':'initialized()',
+            'isInitialized':'isInitialized()',
+            'VERSION':'VERSION()',
+          }
+          SELECTORS={k:selector(v) for k,v in SIGS.items()}
+          EIP1967_IMPL='0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+          EIP1967_ADMIN='0xb53127684a568b3173ae13b9f8a6016e019a42e88ee1178d6a717850b5d6103'
+          EIP1967_BEACON='0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50'
+
+          def decode_uint(x):
+              try: return int(x,16)
+              except Exception: return None
+          def decode_addr(x):
+              if isinstance(x,str) and x.startswith('0x') and len(x)>=42:
+                  return '0x'+x[-40:]
+              return None
+          def decode_dyn_addr_count(x):
+              try:
+                  b=x[2:]; off=int(b[:64],16)*2; return int(b[off:off+64],16)
+              except Exception: return None
+          def code_present(x): return isinstance(x,str) and x.startswith('0x') and len(x)>4
+
+          def choose_rpc(cid):
+              for url in endpoints.get(cid,[])[:12]:
+                  got=rpc(url,'eth_chainId',[],8)
+                  try:
+                      if int(got,16)==cid: return url
+                  except Exception: pass
+              return None
+
+          def scan(row):
+              cid=int(row['chain_id']); owner=row['captain_owner']; captain=row.get('owner')
+              url=choose_rpc(cid)
+              base={'chain':row['chain'],'chain_id':cid,'captain_owner':owner,'rpc':url}
+              if not url:
+                  return {**base,'classification':'NO_RPC'}
+              code=rpc(url,'eth_getCode',[owner,'latest'])
+              nonce=decode_uint(rpc(url,'eth_getTransactionCount',[owner,'latest']))
+              bal=decode_uint(rpc(url,'eth_getBalance',[owner,'latest']))
+              base.update(code_size=(len(code)-2)//2 if code_present(code) else 0, nonce=nonce, balance=bal)
+              if not code_present(code):
+                  base['classification']='EOA_OR_COUNTERFACTUAL_NO_CODE'
+                  return base
+              base['codehash']=subprocess.check_output(['cast','keccak',code],text=True,timeout=10).strip()
+              base['slot0']=rpc(url,'eth_getStorageAt',[owner,'0x0','latest'])
+              base['eip1967_impl']=rpc(url,'eth_getStorageAt',[owner,EIP1967_IMPL,'latest'])
+              base['eip1967_admin']=rpc(url,'eth_getStorageAt',[owner,EIP1967_ADMIN,'latest'])
+              base['eip1967_beacon']=rpc(url,'eth_getStorageAt',[owner,EIP1967_BEACON,'latest'])
+              calls={k:eth_call(url,owner,v) for k,v in SELECTORS.items()}
+              base['master_copy']=decode_addr(calls['masterCopy'])
+              base['safe_owner_count']=decode_dyn_addr_count(calls['getOwners'])
+              base['safe_threshold']=decode_uint(calls['getThreshold'])
+              base['safe_nonce']=decode_uint(calls['nonce'])
+              base['owner_call']=decode_addr(calls['owner'])
+              base['potential_owner_call']=decode_addr(calls['potentialOwner'])
+              base['implementation_call']=decode_addr(calls['implementation'])
+              base['initialized_call']=decode_uint(calls['initialized'])
+              base['is_initialized_call']=decode_uint(calls['isInitialized'])
+              if base['master_copy']:
+                  if (base['safe_owner_count'] or 0)>0 and (base['safe_threshold'] or 0)>0:
+                      base['classification']='SAFE_INITIALIZED'
+                  else:
+                      base['classification']='SAFE_PROXY_UNINITIALIZED_SUSPECT'
+              elif base['owner_call'] and base['owner_call']!='0x'+'0'*40:
+                  base['classification']='OWNABLE_INITIALIZED'
+              elif base['initialized_call'] or base['is_initialized_call']:
+                  base['classification']='INITIALIZED_FLAG_TRUE'
+              elif base['implementation_call'] or decode_addr(base['eip1967_impl']):
+                  base['classification']='PROXY_UNKNOWN_SETUP'
+              else:
+                  base['classification']='UNKNOWN_CONTRACT'
+              return base
+
+          live=[r for r in rows if r.get('status')=='LIVE' and r.get('captain_owner','').startswith('0x')]
+          results=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+              futs=[ex.submit(scan,r) for r in live]
+              for f in concurrent.futures.as_completed(futs):
+                  try: results.append(f.result())
+                  except Exception as e: results.append({'classification':'ERROR','error':repr(e)})
+          results.sort(key=lambda x:x.get('chain_id',0))
+          Path('output/captain_owner_scan.json').write_text(json.dumps(results,indent=2,sort_keys=True)+'\n')
+          fields=sorted({k for r in results for k in r})
+          with Path('output/captain_owner_scan.csv').open('w',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(results)
+          anomalies=[r for r in results if r.get('classification') not in ('SAFE_INITIALIZED','OWNABLE_INITIALIZED')]
+          Path('output/anomalies.json').write_text(json.dumps(anomalies,indent=2,sort_keys=True)+'\n')
+          lines=[f"{r.get('chain')} ({r.get('chain_id')}): {r.get('classification')} owner={r.get('captain_owner')} code={r.get('code_size')} threshold={r.get('safe_threshold')} owners={r.get('safe_owner_count')} ownerCall={r.get('owner_call')}" for r in results]
+          Path('output/SUMMARY.txt').write_text('\n'.join(lines)+'\n')
+          Path('output/VERDICT.txt').write_text(('SUSPECTS_FOUND' if anomalies else 'ALL_OWNERS_INITIALIZED')+'\n')
+          print('\n'.join(lines))
+          print('ANOMALIES',len(anomalies))
+          PY
+          sha256sum output/* > output/SHA256SUMS.txt
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seaport-captain-owner-crosschain-${{ github.run_id }}
+          path: output
+          if-no-files-found: error
