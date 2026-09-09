@@ -1,0 +1,142 @@
+name: Trace live Seaport authority recursively
+
+on:
+  push:
+    branches:
+      - research/seaport-authority-recursion
+    paths:
+      - '.github/workflows/seaport-authority-recursion.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+
+      - name: Resolve authority graph and initialization surfaces
+        shell: bash
+        run: |
+          set -uo pipefail
+          OUT=results/seaport-authority
+          mkdir -p "$OUT"
+
+          CONTROLLER=0x00000000F9490004C11Cef243f5400493c00Ad63
+          CONDUIT=0x1e0049783f008a0085193e00003d00cd54003c71
+          CAPTAIN=0x0000000000d132a69d773c838080dc4Fa478388F
+          SAFE=0xC669B5F25F03be2ac0323037CB57f49eB543657a
+          SENTINEL=0x0000000000000000000000000000000000000001
+
+          RPC=''
+          for candidate in \
+            https://ethereum-rpc.publicnode.com \
+            https://eth.llamarpc.com \
+            https://1rpc.io/eth \
+            https://rpc.flashbots.net; do
+            id=$(timeout 15 cast chain-id --rpc-url "$candidate" 2>/dev/null || true)
+            if [ "$id" = '1' ]; then RPC="$candidate"; break; fi
+          done
+          test -n "$RPC"
+
+          exec > >(tee "$OUT/authority.txt") 2>&1
+          echo "RPC=$RPC"
+          echo "BLOCK=$(cast block-number --rpc-url "$RPC")"
+
+          call() {
+            local label=$1 addr=$2 sig=$3
+            shift 3
+            local out
+            out=$(timeout 20 cast call "$addr" "$sig" "$@" --rpc-url "$RPC" 2>&1) || true
+            echo "CALL|$label|$addr|${out//$'\n'/;}"
+          }
+          slot() {
+            local label=$1 addr=$2 pos=$3
+            local out
+            out=$(timeout 20 cast storage "$addr" "$pos" --rpc-url "$RPC" 2>&1) || true
+            echo "SLOT|$label|$addr|$pos|${out//$'\n'/;}"
+          }
+          code() {
+            local label=$1 addr=$2 c size hash
+            c=$(timeout 20 cast code "$addr" --rpc-url "$RPC" 2>/dev/null || echo 0x)
+            size=$(( (${#c} > 2 ? ${#c}-2 : 0) / 2 ))
+            hash=$(cast keccak "$c" 2>/dev/null || true)
+            echo "CODE|$label|$addr|size=$size|hash=$hash"
+          }
+
+          code controller "$CONTROLLER"
+          code conduit "$CONDUIT"
+          code captain "$CAPTAIN"
+          code safe "$SAFE"
+          call conduit_owner "$CONTROLLER" 'ownerOf(address)(address)' "$CONDUIT"
+          call conduit_pending "$CONTROLLER" 'getPotentialOwner(address)(address)' "$CONDUIT"
+          call conduit_channels "$CONTROLLER" 'getChannels(address)(address[])' "$CONDUIT"
+          call captain_owner "$CAPTAIN" 'owner()(address)'
+          call captain_pending "$CAPTAIN" 'potentialOwner()(address)'
+          call captain_revoker "$CAPTAIN" 'getRevoker()(address)'
+
+          call safe_master_copy "$SAFE" 'masterCopy()(address)'
+          call safe_version "$SAFE" 'VERSION()(string)'
+          call safe_threshold "$SAFE" 'getThreshold()(uint256)'
+          call safe_owners "$SAFE" 'getOwners()(address[])'
+          call safe_modules "$SAFE" 'getModulesPaginated(address,uint256)(address[],address)' "$SENTINEL" 100
+          call safe_guard "$SAFE" 'getGuard()(address)'
+          call safe_nonce "$SAFE" 'nonce()(uint256)'
+          slot safe_slot0 "$SAFE" 0
+
+          SINGLETON_WORD=$(cast storage "$SAFE" 0 --rpc-url "$RPC" 2>/dev/null || true)
+          if [[ "$SINGLETON_WORD" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+            SINGLETON=0x${SINGLETON_WORD:26:40}
+          else
+            SINGLETON=0x0000000000000000000000000000000000000000
+          fi
+          echo "SINGLETON=$SINGLETON"
+          code singleton "$SINGLETON"
+          call singleton_version "$SINGLETON" 'VERSION()(string)'
+          call singleton_threshold "$SINGLETON" 'getThreshold()(uint256)'
+          call singleton_owners "$SINGLETON" 'getOwners()(address[])'
+          call singleton_modules "$SINGLETON" 'getModulesPaginated(address,uint256)(address[],address)' "$SENTINEL" 100
+
+          # Safe guard and fallback-handler storage slots.
+          GUARD_SLOT=0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8
+          FALLBACK_SLOT=0x6c9a6c4a39284e37ed1cf53d15e2971c4c8b7d4fb35b9f3a4d4c859f56e8b600
+          slot safe_guard_slot "$SAFE" "$GUARD_SLOT"
+          slot safe_fallback_slot "$SAFE" "$FALLBACK_SLOT"
+
+          grep -Eo '0x[0-9a-fA-F]{40}' "$OUT/authority.txt" | tr '[:upper:]' '[:lower:]' | sort -u > "$OUT/addresses.txt"
+          echo '--- ONE-HOP CONTRACTS ---'
+          while read -r a; do
+            c=$(cast code "$a" --rpc-url "$RPC" 2>/dev/null || echo 0x)
+            [ ${#c} -gt 4 ] || continue
+            code hop "$a"
+            slot hop_slot0 "$a" 0
+            slot hop_eip1967_impl "$a" 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+            slot hop_eip1967_admin "$a" 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103
+            slot hop_eip1967_beacon "$a" 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+            call hop_owner "$a" 'owner()(address)'
+            call hop_threshold "$a" 'getThreshold()(uint256)'
+            call hop_version "$a" 'VERSION()(string)'
+            call hop_initialized "$a" 'initialized()(bool)'
+            call hop_avatar "$a" 'avatar()(address)'
+            call hop_target "$a" 'target()(address)'
+          done < "$OUT/addresses.txt"
+
+          sha256sum "$OUT/authority.txt" "$OUT/addresses.txt" > "$OUT/SHA256SUMS.txt"
+
+      - name: Commit evidence
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add results/seaport-authority
+          git commit -m 'Record live Seaport authority graph' || exit 0
+          git push
