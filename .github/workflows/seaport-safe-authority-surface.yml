@@ -1,0 +1,100 @@
+name: Seaport Safe authority surface
+
+on:
+  push:
+    branches:
+      - research/seaport-golden-p1
+    paths:
+      - .github/workflows/seaport-safe-authority-surface.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+      - name: Inspect Safe secondary authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python3 - <<'PY'
+          import concurrent.futures, json, re, subprocess, urllib.request
+          from pathlib import Path
+
+          text=Path('results/seaport-cross-chain-state/latest.txt').read_text()
+          rows=[]
+          for raw in re.split(r'\n\s*\n(?=chain=)',text):
+              d={}
+              for line in raw.splitlines():
+                  if '=' in line:
+                      k,v=line.split('=',1); d[k]=v
+              if d.get('status')=='LIVE' and d.get('captain_owner','').startswith('0x'): rows.append(d)
+
+          eps={1:'https://ethereum-rpc.publicnode.com',10:'https://optimism-rpc.publicnode.com',56:'https://bsc-rpc.publicnode.com',137:'https://polygon-bor-rpc.publicnode.com',8217:'https://public-en.node.kaia.io',8453:'https://base-rpc.publicnode.com',42161:'https://arbitrum-one-rpc.publicnode.com',42170:'https://arbitrum-nova-rpc.publicnode.com',43114:'https://avalanche-c-chain-rpc.publicnode.com',7777777:'https://rpc.zora.energy'}
+          def rpc(url,m,p,t=15):
+              q=urllib.request.Request(url,data=json.dumps({'jsonrpc':'2.0','id':1,'method':m,'params':p}).encode(),headers={'content-type':'application/json'})
+              try:
+                  with urllib.request.urlopen(q,timeout=t) as f: return json.loads(f.read()).get('result')
+              except Exception: return None
+          def sig(s): return subprocess.check_output(['cast','sig',s],text=True).strip()
+          MOD=sig('getModulesPaginated(address,uint256)')
+          OWN=sig('getOwners()')
+          GUARD='0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8'
+          HANDLER='0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5'
+          def call(url,to,data): return rpc(url,'eth_call',[{'to':to,'data':data},'latest'])
+          def enc_addr(a): return a[2:].rjust(64,'0')
+          def dec_addr(w): return ('0x'+w[-40:]).lower() if isinstance(w,str) and w.startswith('0x') and len(w)>=42 else None
+          def dec_arr(x):
+              try:
+                  b=x[2:]; off=int(b[:64],16)*2; n=int(b[off:off+64],16); p=off+64
+                  return [('0x'+b[p+i*64:p+(i+1)*64][-40:]).lower() for i in range(n)]
+              except Exception:return []
+          def scan(d):
+              cid=int(d['chain_id']); url=eps.get(cid); safe=d['captain_owner'].lower()
+              out={'chain':d['chain'],'chain_id':cid,'safe':safe,'rpc':url}
+              if not url: out['error']='no rpc'; return out
+              modules_raw=call(url,safe,MOD+enc_addr('0x0000000000000000000000000000000000000001')+hex(100)[2:].rjust(64,'0'))
+              out['modules']=dec_arr(modules_raw)
+              out['owners']=dec_arr(call(url,safe,OWN))
+              out['guard']=dec_addr(rpc(url,'eth_getStorageAt',[safe,GUARD,'latest']))
+              out['handler']=dec_addr(rpc(url,'eth_getStorageAt',[safe,HANDLER,'latest']))
+              targets=list(dict.fromkeys(out['modules']+[x for x in [out['guard'],out['handler']] if x and x!='0x'+'0'*40]))
+              ti=[]
+              for a in targets:
+                  code=rpc(url,'eth_getCode',[a,'latest']) or '0x'
+                  info={'address':a,'code_size':max(0,(len(code)-2)//2),'nonce':int(rpc(url,'eth_getTransactionCount',[a,'latest']) or '0x0',16)}
+                  if info['code_size']:
+                      info['codehash']=subprocess.check_output(['cast','keccak',code],text=True).strip()
+                      for fn in ['owner()','initialized()','isInitialized()','masterCopy()','getOwners()','getThreshold()','implementation()']:
+                          ret=call(url,a,sig(fn)); info[fn]=ret
+                  ti.append(info)
+              out['targets']=ti
+              owner_info=[]
+              for a in out['owners']:
+                  code=rpc(url,'eth_getCode',[a,'latest']) or '0x'
+                  owner_info.append({'address':a,'code_size':max(0,(len(code)-2)//2),'nonce':int(rpc(url,'eth_getTransactionCount',[a,'latest']) or '0x0',16)})
+              out['owner_accounts']=owner_info
+              return out
+          results=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex: results=list(ex.map(scan,rows))
+          Path('output/results.json').write_text(json.dumps(results,indent=2,sort_keys=True)+'\n')
+          lines=[]
+          for r in results:
+              lines.append(f"{r.get('chain')}: modules={r.get('modules')} guard={r.get('guard')} handler={r.get('handler')} owner_accounts={r.get('owner_accounts')}")
+          Path('output/SUMMARY.txt').write_text('\n'.join(lines)+'\n'); print('\n'.join(lines))
+          PY
+          sha256sum output/* > output/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seaport-safe-authority-surface-${{ github.run_id }}
+          path: output
+          if-no-files-found: error
