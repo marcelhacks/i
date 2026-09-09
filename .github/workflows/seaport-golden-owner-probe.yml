@@ -1,0 +1,110 @@
+name: Seaport golden owner probe
+
+on:
+  push:
+    branches:
+      - research/seaport-golden-p1
+    paths:
+      - .github/workflows/seaport-golden-owner-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+      - name: Probe Ethereum ownership chain
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p output
+          RPC=''
+          for candidate in \
+            https://ethereum-rpc.publicnode.com \
+            https://rpc.flashbots.net \
+            https://1rpc.io/eth; do
+            id=$(timeout 15s cast chain-id --rpc-url "$candidate" 2>/dev/null || true)
+            if [[ "$id" == "1" ]]; then RPC="$candidate"; break; fi
+          done
+          if [[ -z "$RPC" ]]; then echo NO_RPC | tee output/VERDICT.txt; exit 0; fi
+
+          CONTROLLER=0x00000000F9490004C11Cef243f5400493c00Ad63
+          CONDUIT=0x1e0049783f008a0085193e00003d00cd54003c71
+          CAPTAIN=0x0000000000d132a69d773c838080dc4Fa478388F
+          OWNER=0xC669B5F25F03be2ac0323037CB57f49eB543657a
+          IMPL=0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+          ADMIN=0xb53127684a568b3173ae13b9f8a6016e019a42e88ee1178d6a717850b5d6103
+          BEACON=0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50
+          OZ_INIT=0xf0c57e16840df040f15088dc2fc686f239f8571373e4725f1a65c3c6a7d5c9a
+
+          echo "RPC=$RPC" | tee output/state.txt
+          echo "BLOCK=$(cast block-number --rpc-url "$RPC")" | tee -a output/state.txt
+          for pair in controller:$CONTROLLER conduit:$CONDUIT captain:$CAPTAIN owner:$OWNER; do
+            label=${pair%%:*}; addr=${pair#*:}
+            code=$(cast code "$addr" --rpc-url "$RPC")
+            printf '%s' "$code" > "output/${label}.bytecode.txt"
+            echo "CODE|$label|$addr|size=$(((${#code}-2)/2))|hash=$(cast keccak "$code")" | tee -a output/state.txt
+            echo "NONCE|$label|$(cast nonce "$addr" --rpc-url "$RPC")" | tee -a output/state.txt
+          done
+
+          for slot in "$IMPL" "$ADMIN" "$BEACON" "$OZ_INIT" 0 1 2 3 4 5 6 7 8 9 10; do
+            out=$(cast storage "$OWNER" "$slot" --rpc-url "$RPC" 2>&1 || true)
+            echo "OWNER_STORAGE|$slot|$out" | tee -a output/state.txt
+          done
+
+          call() {
+            local addr="$1" sig="$2"; shift 2
+            local out
+            out=$(cast call "$addr" "$sig" "$@" --rpc-url "$RPC" 2>&1 || true)
+            out=${out//$'\n'/;}
+            echo "CALL|$addr|$sig|$out" | tee -a output/state.txt
+          }
+
+          call "$CONTROLLER" 'ownerOf(address)(address)' "$CONDUIT"
+          call "$CAPTAIN" 'owner()(address)'
+          call "$CAPTAIN" 'potentialOwner()(address)'
+          call "$CAPTAIN" 'getRevoker()(address)'
+
+          for sig in \
+            'owner()(address)' \
+            'potentialOwner()(address)' \
+            'implementation()(address)' \
+            'getImplementation()(address)' \
+            'masterCopy()(address)' \
+            'getOwners()(address[])' \
+            'getThreshold()(uint256)' \
+            'threshold()(uint256)' \
+            'initialized()(bool)' \
+            'isInitialized()(bool)' \
+            'proxiableUUID()(bytes32)' \
+            'VERSION()(string)' \
+            'version()(string)' \
+            'nonce()(uint256)'; do
+            call "$OWNER" "$sig"
+          done
+
+          cast selectors "$(cat output/owner.bytecode.txt)" > output/owner-selectors.txt 2>&1 || true
+          cast disassemble "$(cat output/owner.bytecode.txt)" > output/owner-disassembly.txt 2>&1 || true
+          cast selectors "$(cat output/captain.bytecode.txt)" > output/captain-selectors.txt 2>&1 || true
+
+          creator=$(cast call "$OWNER" 0x8da5cb5b --rpc-url "$RPC" 2>/dev/null || true)
+          echo "RAW_OWNER_SELECTOR=$creator" | tee -a output/state.txt
+          sha256sum output/* > output/SHA256SUMS.txt
+          echo PROBE_COMPLETE | tee output/VERDICT.txt
+          cat output/state.txt
+          echo '--- OWNER SELECTORS ---'
+          cat output/owner-selectors.txt
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seaport-golden-owner-probe-${{ github.run_id }}
+          path: output
+          if-no-files-found: error
