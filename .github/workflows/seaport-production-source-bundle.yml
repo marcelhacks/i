@@ -1,0 +1,43 @@
+name: Seaport production source bundle
+
+on:
+  push:
+    branches:
+      - research/seaport-golden-p1
+    paths:
+      - .github/workflows/seaport-production-source-bundle.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone exact production revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          git clone https://github.com/ProjectOpenSea/seaport-core.git bundle/seaport-core
+          git -C bundle/seaport-core checkout 523097f9cee66c15d308c900c50f336b291cda08
+          git clone https://github.com/ProjectOpenSea/seaport-types.git bundle/seaport-types
+          git -C bundle/seaport-types checkout b72493221ee1d2f2fb30ed94a3cc535a9028d09f
+          git clone https://github.com/ProjectOpenSea/seaport-sol.git bundle/seaport-sol || true
+          {
+            echo core=$(git -C bundle/seaport-core rev-parse HEAD)
+            echo types=$(git -C bundle/seaport-types rev-parse HEAD)
+          } > bundle/REVISIONS.txt
+          rm -rf bundle/*/.git
+          tar -czf seaport-production-source.tar.gz bundle
+          sha256sum seaport-production-source.tar.gz > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seaport-production-source-${{ github.run_id }}
+          path: |
+            seaport-production-source.tar.gz
+            SHA256SUMS.txt
+          if-no-files-found: error
