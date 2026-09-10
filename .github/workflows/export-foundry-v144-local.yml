@@ -1,0 +1,36 @@
+name: Export Foundry v1.4.4 binaries
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/export-foundry-v144-local.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.4
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cp "$(command -v forge)" output/
+          cp "$(command -v cast)" output/
+          cp "$(command -v anvil)" output/
+          cp "$(command -v chisel)" output/
+          sha256sum output/* > output/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: foundry-v1.4.4-linux-amd64-${{ github.run_id }}
+          path: output
+          if-no-files-found: error
+          retention-days: 7
